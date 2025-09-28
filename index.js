@@ -1,13 +1,93 @@
 require('dotenv').config();
 const express = require('express');
+const cors = require('cors');
+const axios = require('axios');
 const { publish, onMessage } = require('./service/mqtt');
 
 const app = express();
-const port = process.env.SERVER_PORT || 3000;
+const PORT = process.env.PORT || 3000;
 
+// Middleware
+app.use(cors());
 app.use(express.json());
 
+// Temperature storage
+let lastTemperatureReading = {
+    value: null,
+    timestamp: null,
+    status: 'initializing'
+};
+
 let stateBits = "000000";
+
+// ThingSpeak configuration
+const THINGSPEAK_CHANNEL_ID = process.env.THINGSPEAK_CHANNEL_ID || 'your_channel_id';
+const THINGSPEAK_READ_API_KEY = process.env.THINGSPEAK_READ_API_KEY || 'your_read_api_key';
+const THINGSPEAK_FIELD = process.env.THINGSPEAK_FIELD || 'field1'; // field where temperature is stored
+const TEMPERATURE_FETCH_INTERVAL = process.env.TEMPERATURE_FETCH_INTERVAL || 30000; // 30 seconds default
+
+// Function to fetch temperature from ThingSpeak
+async function fetchTemperatureFromThingSpeak() {
+    try {
+        console.log('Fetching temperature from ThingSpeak...');
+        const response = await axios.get(`https://api.thingspeak.com/channels/${THINGSPEAK_CHANNEL_ID}/feeds/last.json`, {
+            params: {
+                api_key: THINGSPEAK_READ_API_KEY
+            }
+        });
+
+        if (response.data && response.data[THINGSPEAK_FIELD]) {
+            const temperature = parseFloat(response.data[THINGSPEAK_FIELD]);
+            const timestamp = new Date(response.data.created_at);
+
+            lastTemperatureReading = {
+                value: temperature,
+                timestamp: timestamp,
+                status: 'success',
+                lastFetch: new Date()
+            };
+
+            console.log(`Temperature updated: ${temperature}°C at ${timestamp}`);
+            return {
+                temperature: temperature,
+                timestamp: timestamp,
+                success: true
+            };
+        } else {
+            lastTemperatureReading.status = 'no_data';
+            return {
+                temperature: null,
+                timestamp: null,
+                success: false,
+                error: 'No temperature data found'
+            };
+        }
+    } catch (error) {
+        console.error('Error fetching temperature from ThingSpeak:', error.message);
+        lastTemperatureReading.status = 'error';
+        lastTemperatureReading.error = error.message;
+        lastTemperatureReading.lastFetch = new Date();
+        return {
+            temperature: null,
+            timestamp: null,
+            success: false,
+            error: error.message
+        };
+    }
+}
+
+// Function to start periodic temperature fetching
+function startTemperatureService() {
+    console.log(`Starting temperature service with ${TEMPERATURE_FETCH_INTERVAL}ms interval`);
+
+    // Fetch immediately on startup
+    fetchTemperatureFromThingSpeak();
+
+    // Set up periodic fetching
+    setInterval(async () => {
+        await fetchTemperatureFromThingSpeak();
+    }, TEMPERATURE_FETCH_INTERVAL);
+}
 
 // Decode helper
 function decodeState(bits) {
@@ -45,11 +125,23 @@ app.get('/health', (req, res) => {
 });
 
 // Get current status
+// Routes
 app.get('/status', (req, res) => {
-    console.log(req.method, req.url);
     res.json({
-        bits: stateBits,
-        devices: decodeState(stateBits)
+        message: 'Smart Home Energy Management Server is running',
+        timestamp: new Date().toISOString(),
+        mqtt: {
+            status: 'connected', // You can get actual MQTT status from mqttService
+        },
+        temperature: {
+            value: lastTemperatureReading.value,
+            unit: '°C',
+            timestamp: lastTemperatureReading.timestamp,
+            lastFetch: lastTemperatureReading.lastFetch,
+            source: 'ThingSpeak',
+            status: lastTemperatureReading.status,
+            error: lastTemperatureReading.error || null
+        }
     });
 });
 
@@ -76,6 +168,9 @@ app.post('/status', (req, res) => {
 });
 
 // Start server
-app.listen(port, () => {
-    console.log(`✅ Server running at http://localhost:${port}`);
+app.listen(PORT, () => {
+    console.log(`Server is running on http://localhost:${PORT}`);
+
+    // Start temperature service
+    startTemperatureService();
 });
